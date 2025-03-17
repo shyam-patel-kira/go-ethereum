@@ -153,7 +153,7 @@ func (r *Receipt) MarshalBinary() ([]byte, error) {
 // DecodeRLP implements rlp.Decoder, and loads the consensus fields of a receipt
 // from an RLP stream.
 func (r *Receipt) DecodeRLP(s *rlp.Stream) error {
-	kind, _, err := s.Kind()
+	kind, size, err := s.Kind()
 	switch {
 	case err != nil:
 		return err
@@ -165,10 +165,16 @@ func (r *Receipt) DecodeRLP(s *rlp.Stream) error {
 		}
 		r.Type = LegacyTxType
 		return r.setFromRLP(dec)
+	case kind == rlp.Byte:
+		return errShortTypedReceipt
 	default:
 		// It's an EIP-2718 typed tx receipt.
-		b, err := s.Bytes()
+		b, buf, err := getPooledBuffer(size)
 		if err != nil {
+			return err
+		}
+		defer encodeBufferPool.Put(buf)
+		if err := s.ReadBytes(b); err != nil {
 			return err
 		}
 		return r.decodeTyped(b)
@@ -198,7 +204,7 @@ func (r *Receipt) decodeTyped(b []byte) error {
 		return errShortTypedReceipt
 	}
 	switch b[0] {
-	case DynamicFeeTxType, AccessListTxType, BlobTxType:
+	case DynamicFeeTxType, AccessListTxType, BlobTxType, SetCodeTxType:
 		var data receiptRLP
 		err := rlp.DecodeBytes(b[1:], &data)
 		if err != nil {
@@ -264,7 +270,7 @@ func (r *ReceiptForStorage) EncodeRLP(_w io.Writer) error {
 	w.WriteUint64(r.CumulativeGasUsed)
 	logList := w.List()
 	for _, log := range r.Logs {
-		if err := rlp.Encode(w, log); err != nil {
+		if err := log.EncodeRLP(w); err != nil {
 			return err
 		}
 	}
@@ -285,7 +291,7 @@ func (r *ReceiptForStorage) DecodeRLP(s *rlp.Stream) error {
 	}
 	r.CumulativeGasUsed = stored.CumulativeGasUsed
 	r.Logs = stored.Logs
-	r.Bloom = CreateBloom(Receipts{(*Receipt)(r)})
+	r.Bloom = CreateBloom((*Receipt)(r))
 
 	return nil
 }
@@ -306,7 +312,7 @@ func (rs Receipts) EncodeIndex(i int, w *bytes.Buffer) {
 	}
 	w.WriteByte(r.Type)
 	switch r.Type {
-	case AccessListTxType, DynamicFeeTxType, BlobTxType:
+	case AccessListTxType, DynamicFeeTxType, BlobTxType, SetCodeTxType:
 		rlp.Encode(w, data)
 	default:
 		// For unsupported types, write nothing. Since this is for
